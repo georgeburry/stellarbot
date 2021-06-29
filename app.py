@@ -1,4 +1,5 @@
 import time
+import json
 import pandas as pd
 from stellar_sdk import (
     Asset,
@@ -15,6 +16,198 @@ from config import (
     COUNTER_ASSET,
     BASE_ASSETS,
 )
+
+
+class MarketMaker:
+
+    def __init__(self):
+        self.server = Server(horizon_url=URL)
+        self.keypair = Keypair.from_secret(SECRET)
+        self.account = None
+        self.get_account()
+        self.transaction = TransactionBuilder(
+            source_account=self.account,
+            network_passphrase=Network.PUBLIC_NETWORK_PASSPHRASE,
+            base_fee=100
+        )
+        self.counter_asset = Asset(COUNTER_ASSET[0], issuer=COUNTER_ASSET[1])
+        self.base_balances = {}
+        self.counter_balance = 0
+        self.records = {}
+        self.candles = {}
+        self.orderbook = {}
+        self.buy_offers = []
+        self.sell_offers = []
+        self.fills = []
+        self.open_records()
+        self.get_latest_candles()
+        self.get_balances()
+
+    def open_records(self):
+        with open('mmrecords.json', 'r') as f:
+            self.records = json.load(f)
+            f.close()
+
+    def save_records(self):
+        with open('mmrecords.json', 'w') as f:
+            self.records = json.dump(self.records, f)
+            f.close()
+
+    def get_latest_candles(self):
+        for asset in BASE_ASSETS:
+            base_asset = Asset(asset, issuer=BASE_ASSETS[asset])
+            r = self.server.trade_aggregations(
+                base_asset,
+                self.counter_asset,
+                3600000,
+                start_time=int((time.time() - 3600) * 1000)
+            ).limit(1).call()
+            self.candles[
+                f'{asset}-{COUNTER_ASSET[0]}'
+            ] = r['_embedded']['records']
+
+    def get_orderbook(self, asset: str):
+        base_asset = Asset(asset, issuer=BASE_ASSETS[asset])
+        self.orderbook = self.server.orderbook(
+            selling=base_asset,
+            buying=self.counter_asset
+        ).call()
+
+    def get_account(self):
+        self.account = self.server.load_account(
+            account_id=self.keypair.public_key
+        )
+
+    def get_balances(self):
+        r = self.server.accounts()\
+            .for_signer(signer=self.keypair.public_key).call()
+        balances = r['_embedded']['records'][0]['balances']
+        for asset in BASE_ASSETS:
+            self.base_balances[asset] = float(
+                [
+                    x for x in balances
+                    if asset == 'XLM' and x['asset_type'] == 'native'
+                    or x.get('asset_code') == asset
+                ][0]['balance']
+            )
+        self.counter_balance = float(
+            [
+                x for x in balances
+                if x.get('asset_code') == COUNTER_ASSET[0]
+                and x.get('asset_issuer') == COUNTER_ASSET[1]
+            ][0]['balance']
+        )
+
+    def get_buy_offers(self, asset: str):
+        r = self.server.offers().for_seller(self.keypair.public_key).call()
+        offers = r['_embedded']['records']
+        self.buy_offers = [
+            x for x in offers
+            if (
+                x['buying'].get('asset_code')
+                and x['buying']['asset_code'] == BASE_ASSETS[asset]
+                or asset == 'XLM'
+                and x['buying']['asset_type'] == 'native'
+            )
+            and x['selling'].get('asset_code')
+            and x['selling']['asset_code'] == COUNTER_ASSET[0]
+        ]
+
+    def get_sell_offers(self, asset: str):
+        r = self.server.offers().for_seller(self.keypair.public_key).call()
+        offers = r['_embedded']['records']
+        self.sell_offers = [
+            x for x in offers
+            if (
+                x['selling'].get('asset_code')
+                and x['selling']['asset_code'] == BASE_ASSETS[asset]
+                or asset == 'XLM'
+                and x['selling']['asset_type'] == 'native'
+            )
+            and x['buying'].get('asset_code')
+            and x['buying']['asset_code'] == COUNTER_ASSET[0]
+        ]
+
+    def trade(self):
+        for market in self.candles:
+            asset = market.split('-')[0]
+            base_asset = Asset(asset, issuer=BASE_ASSETS[asset])
+            record = self.records[market]
+            candle = self.candles[market][0]
+            self.get_orderbook(asset)
+            self.get_buy_offers(asset)
+            self.get_sell_offers(asset)
+
+            base_balance_quote = \
+                self.base_balances[asset] \
+                    * float(candle['close'])
+
+            if base_balance_quote < self.counter_balance:
+                orderbook_price = float(self.orderbook['asks'][0]['price'])
+                size = min(self.counter_balance, 10000)
+                size = round(size / orderbook_price, 7)
+                price = min(
+                    float(candle['close']),
+                    float(self.orderbook['bids'][0]['price'])
+                )
+                price = round(price * .995, 7)
+
+                op = ManageBuyOffer(
+                    selling=self.counter_asset,
+                    buying=base_asset,
+                    amount=str(size),
+                    price=str(price),
+                    offer_id=0
+                )
+
+                if not self.buy_offers:
+                    transaction = self.transaction.append_operation(op) \
+                        .set_timeout(30).build()
+                    transaction.sign(self.keypair)
+                    self.server.submit_transaction(transaction)
+                    record['buySize'] = size
+                    record['buyPrice'] = price
+                elif record['open'] != candle['open']:
+                    op.offer_id = [int(x['id']) for x in self.buy_offers][0]
+                    transaction = self.transaction.append_operation(op) \
+                        .set_timeout(30).build()
+                    transaction.sign(self.keypair)
+                    self.server.submit_transaction(transaction)
+                    record['buySize'] = size
+                    record['buyPrice'] = price
+            else:
+                price = max(
+                    record['buyPrice'] * 1.001 ** 2,
+                    float(self.orderbook['asks'][0]['price'])
+                )
+                price = round(price, 7)
+
+                op = ManageSellOffer(
+                    selling=base_asset,
+                    buying=self.counter_asset,
+                    amount=str(record['buySize']),
+                    price=str(price),
+                    offer_id=0
+                )
+
+                if not self.sell_offers:
+                    transaction = self.transaction.append_operation(op) \
+                        .set_timeout(30).build()
+                    transaction.sign(self.keypair)
+                    self.server.submit_transaction(transaction)
+                elif (
+                    float(self.orderbook['bids'][0]['price']) <
+                    record['buyPrice'] * .99
+                    ):
+                    op.price = self.orderbook['bids'][0]['price']
+                    op.offer_id = [int(x['id']) for x in self.sell_offers][0]
+                    transaction = self.transaction.append_operation(op) \
+                        .set_timeout(30).build()
+                    transaction.sign(self.keypair)
+                    self.server.submit_transaction(transaction)
+
+            record['open'] = candle['open']
+        self.save_records()
 
 
 def run_bot():

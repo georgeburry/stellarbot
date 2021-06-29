@@ -1,0 +1,14 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+celery = "==5.0.5"
+pandas = "==1.2.4"
+stellar-sdk = "==3.3.2"
+
+[dev-packages]
+
+[requires]
+python_version = "3.8"

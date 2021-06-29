@@ -1,5 +1,5 @@
 from celery import Celery
-from app import run_bot as run_bot_fn
+from app import MarketMaker
 
 
 app = Celery('tasks')
@@ -12,4 +12,5 @@ def setup_periodic_tasks(sender, **kwargs):
 
 @app.task
 def run_bot():
-    run_bot_fn()
+    mm = MarketMaker()
+    mm.trade()
