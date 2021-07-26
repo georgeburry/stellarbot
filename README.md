@@ -1,4 +1,4 @@
-# stellar
+# Stellar trading bot
 An application that trades automatically in a decentralised manner on the Stellar (XLM) network. It employs a market making strategy.
 
 ### Warning
