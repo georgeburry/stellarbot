@@ -237,8 +237,6 @@ class Bot:
                     transaction.sign(self.keypair)
                     self.server.submit_transaction(transaction)
 
-bot = Bot()
-bot.run_meanreversion_strategy()
 
 # def run_bot():
 
