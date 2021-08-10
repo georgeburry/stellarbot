@@ -204,15 +204,15 @@ class Bot:
                 record = self.load_market_record()
                 entry_price = record['entryPrice']
                 target_sigma = record['targetSigma']
-                ask_price = float(self.orderbook['asks'][0]['price'])
+                bid_price = float(self.orderbook['bids'][0]['price'])
                 # Take profit price
                 price = max(
                     entry_price + target_sigma,
-                    entry_price * 1.0075,
+                    entry_price * 1.005,
                 )
                 # Stop loss price
-                if ask_price < entry_price - (price - entry_price) * .67:
-                    price = ask_price
+                if bid_price < entry_price - (price - entry_price) * .5:
+                    price = bid_price
                 price = str(round(price, 7))
                 size = str(round((self.base_balance - 2) * .99, 7))
 
